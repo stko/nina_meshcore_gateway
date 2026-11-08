@@ -64,7 +64,10 @@ class SplPlugin(SplThread):
             self.modref.message_handler.queue_event(
                 None,
                 msg_ids.MSG_NMG_WARNING_TEXT,
-                {"text": "test warning message from dwd_listen plugin"},
+                {
+                    "source": "dwd",
+                    "text": "Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet.",
+                },
             )
         if queue_event.type == "_join":
             print("a web client has connected", queue_event.data)
