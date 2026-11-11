@@ -137,7 +137,26 @@ class SplPlugin(SplThread):
         self._mc: Optional[MeshCore] = None  # MeshCore instance
         self._on_message: Optional[Callable] = None
         self._contacts_cache: dict = {}
-        asyncio.run(self.init_main())  # Start the async initialization
+        ##asyncio.run(self.run_async())  # Start the async initialization
+
+        # a masterpiece of https://gist.github.com/dmfigol/3e7d5b84a16d076df02baa9f53271058
+        # a coroutine in its own thread
+
+        loop = asyncio.new_event_loop()
+
+        # Step 1): we start an empty thread with just an asyncio event loop
+
+        empty_thread_loop = threading.Thread(
+            target=self.start_background_loop, args=(loop,)
+        )
+        empty_thread_loop.start()
+
+        # Step2): we inject the async routine into the event loop of the empty thread
+        asyncio.run_coroutine_threadsafe(self.run_async(), loop)
+
+    def start_background_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        asyncio.set_event_loop(loop)
+        loop.run_forever()
 
     def event_listener(self, queue_event):
         """try to send simulated answers"""
@@ -146,6 +165,16 @@ class SplPlugin(SplThread):
             print(f"plugin {self.plugin_id} received system ready event")
         if queue_event.type == msg_ids.MSG_NMG_WARNING_TEXT:
             print(f"plugin {self.plugin_id} received NMG warning text event")
+            source = queue_event.data.get("source", "unknown")
+            text = queue_event.data.get("text", "")
+            print(f"Source: {source}, Text: {text}")
+
+            asyncio.run(
+                self.send_message(
+                    "6d1d1956a7f193aaa789ad5847b2565add244636af38e2ed49c72cd57343ed99",
+                    text,
+                )
+            )
         if queue_event.type == "_join":
             print("a web client has connected", queue_event.data)
         # for further pocessing, do not forget to return the queue event
@@ -217,6 +246,7 @@ class SplPlugin(SplThread):
                 if name:
                     self._contacts_cache[f"name:{name}"] = contact
             logger.info("Loaded %d contacts.", len(contacts))
+            print(f"Loaded {len(contacts)} contacts.")
 
         except Exception:
             logger.exception("Could not refresh contacts:")
@@ -237,6 +267,29 @@ class SplPlugin(SplThread):
                 return c, name
         return None, pubkey_prefix[:4]
 
+    async def distribute_message(self, contact, text: str) -> bool:
+        """Distribute a message to a contact or channel, automatically chunking if needed."""
+        if not self._mc:
+            raise RuntimeError("Not connected. Call connect() first.")
+
+        if isinstance(contact, dict):
+            # Determine if it's a group/channel
+            is_group = contact.get("is_group", False)
+            if is_group:
+                channel_idx = contact.get("channel_idx", 0)
+                return await self.send_channel_message(channel_idx, text)
+            else:
+                return await self.send_message(contact, text)
+        elif isinstance(contact, str):
+            # Assume it's a pubkey prefix for a contact
+            return await self.send_message(contact, text)
+        else:
+            logger.error("Invalid contact type for message distribution.")
+            return False
+
+    def _sync_handle_contact_msg(self, event):
+        asyncio.run(self._handle_contact_msg(event))
+
     async def _handle_contact_msg(self, event):
         print("msg")
         try:
@@ -252,18 +305,14 @@ class SplPlugin(SplThread):
                 channel="",
                 contact=contact,
             )
-            if self.redact_logs:
-                logger.info(
-                    "[RX DM] %s (%s): <redacted>", msg.sender_name, msg.sender_id
-                )
-            else:
-                logger.info(
-                    "[RX DM] %s (%s): %s", msg.sender_name, msg.sender_id, msg.text
-                )
+            logger.info("[RX DM] %s (%s): %s", msg.sender_name, msg.sender_id, msg.text)
             if self._on_message:
                 await self._on_message(msg)
         except Exception:
             logger.exception("Error handling contact message:")
+
+    def _sync_handle_channel_msg(self, event):
+        asyncio.run(self._handle_channel_msg(event))
 
     async def _handle_channel_msg(self, event):
         try:
@@ -280,10 +329,7 @@ class SplPlugin(SplThread):
                 channel=str(channel_idx),
                 contact=contact,
             )
-            if self.redact_logs:
-                logger.info("[RX CH%s] %s: <redacted>", channel_idx, msg.sender_name)
-            else:
-                logger.info("[RX CH%s] %s: %s", channel_idx, msg.sender_name, msg.text)
+            logger.info("[RX CH%s] %s: %s", channel_idx, msg.sender_name, msg.text)
             if self._on_message:
                 await self._on_message(msg)
         except Exception:
@@ -413,21 +459,19 @@ class SplPlugin(SplThread):
     async def mc_msg_handler(self, msg: MeshMessage):
         print(msg)
 
-    async def init_main(self):
+    async def run_async(self):
         self.on_message(self.mc_msg_handler)
         await self.connect()
         device_info = await self.get_device_info()
         print(device_info)
-        # asyncio.create_task(self.start_listening())
-        # self._mc.subscribe(EventType.CONTACT_MSG_RECV, self._handle_contact_msg)
-        # self._mc.subscribe(EventType.CHANNEL_MSG_RECV, self._handle_channel_msg)
-        print("start to send")
-        await self.send_message(
-            "6d1d1956a7f193aaa789ad5847b2565add244636af38e2ed49c72cd57343ed99",
-            "Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet.",
-        )
-        print("sleep")
-        await asyncio.sleep(20)
-        print("disconnect")
-        await self.disconnect()
-        print("end main")
+        asyncio.create_task(self.start_listening())  # this will run in the background
+        # print("start to send")
+        # await self.send_message(
+        #     "6d1d1956a7f193aaa789ad5847b2565add244636af38e2ed49c72cd57343ed99",
+        #     "Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet.",
+        # )
+        # print("sleep")
+        # await asyncio.sleep(20)
+        # print("disconnect")
+        # await self.disconnect()
+        # print("end main")
