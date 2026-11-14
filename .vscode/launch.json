@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python-Debugger: Aktuelle Datei",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
             "name": "Python-Debugger: Nina Meshcore Gateway",
             "type": "debugpy",
             "request": "launch",
