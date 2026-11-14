@@ -18,11 +18,11 @@ from meshcore import MeshCore
 from meshcore.events import EventType
 
 # own local modules
-import msg_ids
 
 from was import defaults
 from was.splthread import SplThread
 from was.common.jsonstorage import JsonStorage
+import msg_ids
 
 logger = logging.getLogger("nmg.meshcore")
 
@@ -46,7 +46,7 @@ MESHCORE_CHAR_LIMIT = 133
 
 def chunk_message(text: str, limit: int = MESHCORE_CHAR_LIMIT) -> List[str]:
     """
-    Split a long AI response into MeshCore-compatible chunks.
+    Split a long text into MeshCore-compatible chunks.
     Tries to split on sentence boundaries, then word boundaries.
     Each chunk is prefixed with [n/N] if multiple chunks.
     """
@@ -112,7 +112,9 @@ class SplPlugin(SplThread):
             {
                 "channels": {},
                 "users": {
-                    "testuser": "6d1d1956a7f193aaa789ad5847b2565add244636af38e2ed49c72cd57343ed99"
+                    "dwd": [
+                        "6d1d1956a7f193aaa789ad5847b2565add244636af38e2ed49c72cd57343ed99"
+                    ]
                 },
                 "connection": {
                     "type": "serial",  # or "tcp"
@@ -134,10 +136,10 @@ class SplPlugin(SplThread):
         self.run_flag = True
 
         # plugin specific attributes
+        self.debug = False
         self._mc: Optional[MeshCore] = None  # MeshCore instance
         self._on_message: Optional[Callable] = None
         self._contacts_cache: dict = {}
-        ##asyncio.run(self.run_async())  # Start the async initialization
 
         # a masterpiece of https://gist.github.com/dmfigol/3e7d5b84a16d076df02baa9f53271058
         # a coroutine in its own thread
@@ -155,28 +157,30 @@ class SplPlugin(SplThread):
         asyncio.run_coroutine_threadsafe(self.run_async(), loop)
 
     def start_background_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """software construct to run a async process inside a thread
+
+        Args:
+            loop (asyncio.AbstractEventLoop): async loop to inject into the asyncio machine
+        """
         asyncio.set_event_loop(loop)
         loop.run_forever()
 
     def event_listener(self, queue_event):
         """try to send simulated answers"""
         # print("uihandler event handler", queue_event.type, queue_event.user)
+
         if queue_event.type == defaults.MSG_SYSTEM_READY:
-            print(f"plugin {self.plugin_id} received system ready event")
+            logger.info("plugin %s received system ready event", self.plugin_id)
+
         if queue_event.type == msg_ids.MSG_NMG_WARNING_TEXT:
-            print(f"plugin {self.plugin_id} received NMG warning text event")
+            logger.info("plugin %s received NMG warning text event", self.plugin_id)
             source = queue_event.data.get("source", "unknown")
             text = queue_event.data.get("text", "")
-            print(f"Source: {source}, Text: {text}")
+            logger.info("Source: %s, Text: %s", source, text)
+            self.distribute_warning(source, text)
 
-            asyncio.run(
-                self.send_message(
-                    "6d1d1956a7f193aaa789ad5847b2565add244636af38e2ed49c72cd57343ed99",
-                    text,
-                )
-            )
         if queue_event.type == "_join":
-            print("a web client has connected", queue_event.data)
+            logger.info("a web client has connected: %s", queue_event.data)
         # for further pocessing, do not forget to return the queue event
         return queue_event
 
@@ -192,7 +196,7 @@ class SplPlugin(SplThread):
         # https://stackoverflow.com/a/36499538/1927807
         t = threading.current_thread()
         while getattr(t, "run_flag", True):
-            time.sleep(10)
+            time.sleep(2)
             with self.lock:
                 pass
 
@@ -201,6 +205,25 @@ class SplPlugin(SplThread):
         asyncio.run(self.disconnect())  # Ensure we disconnect from MeshCore
 
     # ------ plugin specific routines
+
+    def distribute_warning(self, source: str, text: str):
+        """Distribute a warning message to all contacts."""
+        user_list = self.config.read("users", {}).get(source, [])
+        for pubkey in user_list:
+            asyncio.run(
+                self.send_message(
+                    pubkey,
+                    text,
+                )
+            )
+        channel_list = self.config.read("channels", {}).get(source, [])
+        for channel_idx in channel_list:
+            asyncio.run(
+                self.send_channel_message(
+                    channel_idx,
+                    text,
+                )
+            )
 
     async def connect(self):
         """Establish serial connection to MeshCore device."""
@@ -231,7 +254,7 @@ class SplPlugin(SplThread):
                 raise RuntimeError("Not connected. Call connect() first.")
             result = await self._mc.commands.get_contacts()
             if result.type == EventType.ERROR:
-                print(f"Error getting contacts: {result.payload}")
+                logger.error("Error getting contacts: %s", result.payload)
                 return
 
             # ok = await self._mc.ensure_contacts()
@@ -246,9 +269,8 @@ class SplPlugin(SplThread):
                 if name:
                     self._contacts_cache[f"name:{name}"] = contact
             logger.info("Loaded %d contacts.", len(contacts))
-            print(f"Loaded {len(contacts)} contacts.")
 
-        except Exception:
+        except RuntimeError:
             logger.exception("Could not refresh contacts:")
 
     def on_message(self, callback: Callable):
@@ -287,11 +309,8 @@ class SplPlugin(SplThread):
             logger.error("Invalid contact type for message distribution.")
             return False
 
-    def _sync_handle_contact_msg(self, event):
-        asyncio.run(self._handle_contact_msg(event))
-
     async def _handle_contact_msg(self, event):
-        print("msg")
+        logger.info("Handling contact message event: %s", event)
         try:
             payload = event.payload
             pubkey_prefix = payload.get("pubkey_prefix", "unknown")
@@ -308,11 +327,8 @@ class SplPlugin(SplThread):
             logger.info("[RX DM] %s (%s): %s", msg.sender_name, msg.sender_id, msg.text)
             if self._on_message:
                 await self._on_message(msg)
-        except Exception:
+        except RuntimeError:
             logger.exception("Error handling contact message:")
-
-    def _sync_handle_channel_msg(self, event):
-        asyncio.run(self._handle_channel_msg(event))
 
     async def _handle_channel_msg(self, event):
         try:
@@ -332,7 +348,7 @@ class SplPlugin(SplThread):
             logger.info("[RX CH%s] %s: %s", channel_idx, msg.sender_name, msg.text)
             if self._on_message:
                 await self._on_message(msg)
-        except Exception:
+        except RuntimeError:
             logger.exception("Error handling channel message:")
 
     async def start_listening(self):
@@ -341,7 +357,7 @@ class SplPlugin(SplThread):
         if not self._mc:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        self._running = True
+        self.run_flag = True
         logger.info("Listening for incoming MeshCore messages...")
 
         self._mc.subscribe(EventType.CONTACT_MSG_RECV, self._handle_contact_msg)
@@ -350,7 +366,7 @@ class SplPlugin(SplThread):
         await self._mc.start_auto_message_fetching()
         logger.info("Auto message fetching started.")
 
-        while self._running:
+        while self.run_flag:
             await asyncio.sleep(0.1)
 
     async def send_message(self, contact, text: str) -> bool:
@@ -375,28 +391,10 @@ class SplPlugin(SplThread):
                 if result.type == EventType.ERROR:
                     logger.error("Failed to send chunk %d: %s", i + 1, result.payload)
                     return False
-                """
-                expected_ack = result.payload["expected_ack"].hex()
-                print(f"Message sent, waiting for ack with code: {expected_ack}")
-
-                # Wait specifically for this acknowledgment
-                result = await self._mc.wait_for_event(
-                    EventType.ACK,
-                    attribute_filters={"code": expected_ack},
-                    timeout=10.0,
-                )
-
-                if not result:
-                    print("Message delivery confirmation timed out")
-                    return False
-                print("Message confirmed delivered!")
-                """
-                print("[TX] Chunk %d/%d sent.", i + 1, len(chunks))
                 logger.debug("[TX] Chunk %d/%d sent.", i + 1, len(chunks))
                 if i < len(chunks) - 1:
                     await asyncio.sleep(3)
-                    pass
-            except Exception:
+            except RuntimeError:
                 logger.exception("Error sending chunk %d:", i + 1)
                 return False
 
@@ -428,7 +426,7 @@ class SplPlugin(SplThread):
                 )
                 if i < len(chunks) - 1:
                     await asyncio.sleep(1.5)
-            except Exception:
+            except RuntimeError:
                 logger.exception("Error sending channel chunk %d: ", i + 1)
                 return False
 
@@ -440,7 +438,7 @@ class SplPlugin(SplThread):
             return {}
         result = await self._mc.commands.send_device_query()
         if result.type == EventType.ERROR:
-            pass
+            logger.error("Failed to get device info: %s", result.payload)
         else:
             if hasattr(result, "payload"):
                 return {"self": str(result.payload)}
@@ -452,26 +450,22 @@ class SplPlugin(SplThread):
             try:
                 await self._mc.disconnect()
                 logger.info("Disconnected from MeshCore device.")
-            except Exception as e:
+            except RuntimeError as e:
                 logger.warning("Error during disconnect: %s", e)
             self._mc = None
 
     async def mc_msg_handler(self, msg: MeshMessage):
-        print(msg)
+        """receives incoming messages
+
+        Args:
+            msg (MeshMessage): incoming message
+        """
+        logger.info("Received message: %s", msg)
 
     async def run_async(self):
+        """starts and runs the async process"""
         self.on_message(self.mc_msg_handler)
         await self.connect()
         device_info = await self.get_device_info()
-        print(device_info)
+        logger.info("Device info: %s", device_info)
         asyncio.create_task(self.start_listening())  # this will run in the background
-        # print("start to send")
-        # await self.send_message(
-        #     "6d1d1956a7f193aaa789ad5847b2565add244636af38e2ed49c72cd57343ed99",
-        #     "Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet. Lorem ipsum dolor sit amet, consetetur sadipscing elitr, sed diam nonumy eirmod tempor invidunt ut labore et dolore magna aliquyam erat, sed diam voluptua. At vero eos et accusam et justo duo dolores et ea rebum. Stet clita kasd gubergren, no sea takimata sanctus est Lorem ipsum dolor sit amet.",
-        # )
-        # print("sleep")
-        # await asyncio.sleep(20)
-        # print("disconnect")
-        # await self.disconnect()
-        # print("end main")
